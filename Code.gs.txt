@@ -1,0 +1,123 @@
+function extractEmailsAndAppendSheets() {
+  const labelNames = ['Late Deleveries', 'REIM-Volume', 'Stier Order Tracking'];
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const now = new Date();
+  const startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const timeZone = Session.getScriptTimeZone();
+
+  const headers = [
+    'ThreadID',
+    'Timestamp',
+    'ThreadCount',
+    'From',
+    'To',
+    'Subject',
+    'BodyPreview',
+    'Link',
+    'ReadStatus',
+    'Source',
+    'LastUpdated'
+  ];
+
+  function getOrCreateSheet(name) {
+    let sheet = ss.getSheetByName(name);
+    if (!sheet) {
+      sheet = ss.insertSheet(name);
+      sheet.appendRow(headers);
+    }
+    sheet.getRange('A:A').setNumberFormat('@');
+    return sheet;
+  }
+
+  function getThreadMap(sheet) {
+    const lastRow = sheet.getLastRow();
+    const map = new Map();
+    if (lastRow < 2) return map;
+    const values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (let i = 0; i < values.length; i++) {
+      const id = String(values[i][0]).trim();
+      if (id) map.set(id, i + 2);
+    }
+    return map;
+  }
+
+  function buildRowData(thread, source) {
+    const threadId = String(thread.getId());
+    const messages = thread.getMessages();
+    if (!messages.length) return null;
+
+    const latestMsg = messages[messages.length - 1];
+    const firstMsg = messages[0];
+    const msgDate = latestMsg.getDate();
+    if (msgDate < startDate) return null;
+
+    const from = latestMsg.getFrom();
+    const to = latestMsg.getTo();
+    const subject = latestMsg.getSubject();
+    const bodyPreview = latestMsg
+      .getPlainBody()
+      .substring(0, 100)
+      .replace(/\n/g, ' ')
+      .trim();
+
+    const link = 'https://mail.google.com/mail/u/0/#inbox/' + threadId;
+    const isUnread = thread.isUnread() ? 'Unread' : 'Read';
+    const timestamp = Utilities.formatDate(firstMsg.getDate(), timeZone, 'yyyy-MM-dd HH:mm:ss');
+    const updatedAt = Utilities.formatDate(msgDate, timeZone, 'yyyy-MM-dd HH:mm:ss');
+
+    return [
+      threadId,
+      timestamp,
+      messages.length,
+      from,
+      to,
+      subject,
+      bodyPreview,
+      link,
+      isUnread,
+      source,
+      updatedAt
+    ];
+  }
+
+  function processThreads(threads, source, sheet) {
+    const threadMap = getThreadMap(sheet);
+    const newRows = [];
+
+    threads.forEach(thread => {
+      const threadId = String(thread.getId());
+      const rowData = buildRowData(thread, source);
+      if (!rowData) return;
+
+      if (threadMap.has(threadId)) {
+        const row = threadMap.get(threadId);
+        sheet.getRange(row, 1, 1, rowData.length).setValues([rowData]);
+      } else {
+        newRows.push(rowData);
+      }
+    });
+
+    if (newRows.length > 0) {
+      const startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, newRows.length, newRows[0].length).setValues(newRows);
+    }
+  }
+
+  // Inbox
+  const inboxSheet = getOrCreateSheet('Inbox');
+  const inboxThreads = GmailApp.search(
+    `in:inbox after:${Math.floor(startDate.getTime() / 1000)}`
+  );
+  processThreads(inboxThreads, 'Inbox', inboxSheet);
+
+  // Labels (Late Deleveries is ACTIVE again)
+  labelNames.forEach(labelName => {
+    const label = GmailApp.getUserLabelByName(labelName);
+    if (!label) return;
+
+    const labelSheet = getOrCreateSheet(labelName);
+    const labelThreads = label.getThreads();
+
+    processThreads(labelThreads, `Label: ${labelName}`, labelSheet);
+  });
+}
